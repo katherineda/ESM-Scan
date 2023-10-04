@@ -28,6 +28,14 @@ def generate_all_mutations(sequence,output_file):
                 f.write(sequence[i]+str(i+1)+aa+'\n')
     f.close()
 
+def generate_user_mutations(mutation,output_file):
+    with open(output_file,'w') as f:
+        f.write('mutant\n')
+        l = mutation.split(",")
+        for i in l:
+          f.write(i+'\n')
+    f.close()
+
 # xw
 def plot_esm_scan(seq,output_prefix):
     # read output in a list format
@@ -120,6 +128,11 @@ def create_parser():
         help="CSV file containing the deep mutational scan",
     )
     parser.add_argument(
+        "--dms-mutation",
+        type=str,
+        help="comma separated str of different mutations",
+    )
+    parser.add_argument(
         "--mutation-col",
         type=str,
         default="mutant",
@@ -202,9 +215,12 @@ def compute_pppl(row, sequence, model, alphabet, offset_idx):
 
 def main(args):
     
-    if args.dms_input == None: # generate all possible mutants
+    if len(args.dms_mutation) == 0: # generate all possible mutants
         args.dms_input = str(args.output_prefix)+'-all-mutants.txt'
         generate_all_mutations(args.sequence,args.dms_input)    
+    else:
+        args.dms_input = str(args.output_prefix)+'-user-mutants.txt'
+        generate_user_mutations(args.dms_mutation,args.dms_input)    
     # Load the deep mutational scan
     df = pd.read_csv(args.dms_input)
 
