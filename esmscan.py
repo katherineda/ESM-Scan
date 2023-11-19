@@ -18,6 +18,7 @@ from typing import List, Tuple
 import numpy as np
 from matplotlib import pylab
 
+AAorder=['K','R','H','E','D','N','Q','T','S','C','G','A','V','L','I','M','P','Y','F','W']
 
 # xw
 def generate_all_mutations(sequence, output_file):
@@ -38,9 +39,17 @@ def generate_user_mutations(mutation, output_file):
             f.write(i + '\n')
     f.close()
 
+def generate_user_indels(sequence, indel, output_file):
+    with open(output_file, 'w') as f:
+        f.write(sequence + '\n')
+        l = indel.split(",")
+        for i in l:
+            f.write(i + '\n')
+    f.close()
+
 
 # xw
-def plot_clinvar(df, output_prefix):
+def plot_clinvar(df, output_prefix, indel=False):
     pathogenic_scores = np.load('./ESM-Scan/pathogenic_scores.npy')
     benign_scores = np.load('./ESM-Scan/benign_scores.npy')
     pylab.rcParams['pdf.fonttype'] = 42
@@ -50,14 +59,20 @@ def plot_clinvar(df, output_prefix):
     fig, ax = pylab.subplots()
 
     # Create histograms with density=True to normalize the data
-    ax.hist(pathogenic_scores, bins=300, density=True, color='red', alpha=0.5, label='Pathogenic')
-    ax.hist(benign_scores, bins=300, density=True, color='blue', alpha=0.5, label='Benign')
+    ax.hist(pathogenic_scores, bins=300, density=True, color='red', alpha=0.5, label='ClinVar: Pathogenic')
+    ax.hist(benign_scores, bins=300, density=True, color='blue', alpha=0.5, label='Clinvar: Benign')
 
-    values_to_plot = df['/content/esm1b_t33_650M_UR50S.pt']
-    labels = df['mutant']
-    for label, value in zip(labels, values_to_plot):
-        ax.axvline(x=value, color='red', linestyle='--', alpha=0.5)  # Customize the line style and transparency
-        ax.text(value, 0.01, label, rotation=90, verticalalignment='bottom', horizontalalignment='right')
+    if indel:
+        value_to_plot = df.loc[0, '/content/esm1b_t33_650M_UR50S.pt']
+        label = 'indel mutation'
+        ax.axvline(x=value_to_plot, color='black', linestyle='--', alpha=0.5)
+        ax.text(value_to_plot, 0.01, label, rotation=90, verticalalignment='bottom', horizontalalignment='right')
+    else:
+        values_to_plot = df['/content/esm1b_t33_650M_UR50S.pt']
+        labels = df['mutant']
+        for label, value in zip(labels, values_to_plot):
+            ax.axvline(x=value, color='black', linestyle='--', alpha=0.5)  # Customize the line style and transparency
+            ax.text(value, 0.01, label, rotation=90, verticalalignment='bottom', horizontalalignment='right')
 
     # Add labels and legend
     ax.set_xlabel('Scores')
@@ -168,6 +183,11 @@ def create_parser():
         help="comma separated str of different mutations",
     )
     parser.add_argument(
+        "--dms-indel",
+        type=str,
+        help="comma separated str specifying indel",
+    )
+    parser.add_argument(
         "--mutation-col",
         type=str,
         default="mutant",
@@ -189,7 +209,7 @@ def create_parser():
         "--scoring-strategy",
         type=str,
         default="wt-marginals",
-        choices=["wt-marginals", "pseudo-ppl", "masked-marginals"],
+        choices=["wt-marginals", "masked-marginals", "indel"],
         help=""
     )
     parser.add_argument(
@@ -218,6 +238,18 @@ def label_row(row, sequence, token_probs, alphabet, offset_idx):
     score = token_probs[0, 1 + idx, mt_encoded] - token_probs[0, 1 + idx, wt_encoded]
     return score.item()
 
+def get_logits(seq,model,alphabet,batch_converter,format=None):
+  data = [ ("_", seq),]
+  batch_labels, batch_strs, batch_tokens = batch_converter(data)
+  batch_tokens = batch_tokens.cuda()
+  with torch.no_grad():
+      logits = torch.log_softmax(model(batch_tokens, repr_layers=[33], return_contacts=False)["logits"],dim=-1).cpu().numpy()
+  if format=='pandas':
+    WTlogits = pd.DataFrame(logits[0][1:-1,:],columns=alphabet.all_toks,index=list(seq)).T.iloc[4:24].loc[AAorder]
+    WTlogits.columns = [j.split('.')[0]+' '+str(i+1) for i,j in enumerate(WTlogits.columns)]
+    return WTlogits
+  else:
+    return logits[0][1:-1,:]
 
 def compute_pppl(row, sequence, model, alphabet, offset_idx):
     wt, idx, mt = row[0], int(row[1:-1]) - offset_idx, row[-1]
@@ -245,16 +277,50 @@ def compute_pppl(row, sequence, model, alphabet, offset_idx):
         with torch.no_grad():
             token_probs = torch.log_softmax(model(batch_tokens_masked.cuda())["logits"], dim=-1)
         log_probs.append(token_probs[0, i, alphabet.get_idx(sequence[i])].item())  # vocab size
-    return sum(log_probs)
+    return log_probs
+
+def get_PLL(seq,model,alphabet,batch_converter,reduce=np.sum):
+  s=get_logits(seq,alphabet=alphabet,model=model, batch_converter=batch_converter)
+  idx=[alphabet.tok_to_idx[i] for i in seq]
+  return reduce(np.diag(s[:,idx]))
+
+
+def get_PLLR(wt_seq,mut_seq,start_pos,model,alphabet,batch_converter,weighted=False):
+  fn=np.sum if not weighted else np.mean
+  if max(len(wt_seq),len(mut_seq))<=1022:
+    return  get_PLL(mut_seq,model=model,alphabet=alphabet,batch_converter=batch_converter,reduce=fn) - get_PLL(wt_seq,model=model,alphabet=alphabet,batch_converter=batch_converter,reduce=fn)
+  else:
+    wt_seq,mut_seq,start_pos = crop_indel(wt_seq,mut_seq,start_pos)
+    return  get_PLL(mut_seq,model=model,alphabet=alphabet,batch_converter=batch_converter,reduce=fn) - get_PLL(wt_seq,model=model,alphabet=alphabet,batch_converter=batch_converter,reduce=fn)
+
+
+def crop_indel(ref_seq, alt_seq, ref_start):
+    # Start pos: 1-indexed start position of variant
+    left_pos = ref_start - 1
+    offset = len(ref_seq) - len(alt_seq)
+    start_pos = int(left_pos - 1022 / 2)
+    end_pos1 = int(left_pos + 1022 / 2) - min(start_pos, 0) + min(offset, 0)
+    end_pos2 = int(left_pos + 1022 / 2) - min(start_pos, 0) - max(offset, 0)
+    if start_pos < 0: start_pos = 0  # Make sure the start position is not negative
+    if end_pos1 > len(ref_seq): end_pos1 = len(
+        ref_seq)  # Make sure the end positions are not beyond the end of the sequence
+    if end_pos2 > len(alt_seq): end_pos2 = len(alt_seq)
+    if start_pos > 0 and max(end_pos2, end_pos1) - start_pos < 1022:  ## extend to the left if there's space
+        start_pos = max(0, max(end_pos2, end_pos1) - 1022)
+
+    return ref_seq[start_pos:end_pos1], alt_seq[start_pos:end_pos2], start_pos - ref_start
 
 
 def main(args):
-    if len(args.dms_mutation) == 0:  # generate all possible mutants
-        args.dms_input = str(args.output_prefix) + '-all-mutants.txt'
-        generate_all_mutations(args.sequence, args.dms_input)
-    else:
+    if args.dms_mutation:
         args.dms_input = str(args.output_prefix) + '-user-mutants.txt'
         generate_user_mutations(args.dms_mutation, args.dms_input)
+    elif args.dms_indel:
+        args.dms_input = str(args.output_prefix) + '-user-indel.txt'
+        generate_user_indels(args.sequence, args.dms_indel, args.dms_input)
+    else: # generate all possible mutants
+        args.dms_input = str(args.output_prefix) + '-all-mutants.txt'
+        generate_all_mutations(args.sequence, args.dms_input)
         # Load the deep mutational scan
     df = pd.read_csv(args.dms_input)
 
@@ -334,22 +400,28 @@ def main(args):
                     ),
                     axis=1,
                 )
-            elif args.scoring_strategy == "pseudo-ppl":
+            elif args.scoring_strategy == "indel":
                 tqdm.pandas()
+                df = df.transpose()
+                df.reset_index(inplace=True)
+                df.columns = ['wt_seq','mut_seq','start_pos']
                 df[model_location] = df.progress_apply(
-                    lambda row: compute_pppl(
-                        row[args.mutation_col], args.sequence, model, alphabet, args.offset_idx
+                    lambda row: get_PLLR(
+                        row['wt_seq'], row['mut_seq'], row['start_pos'], model, alphabet, batch_converter
                     ),
-                    axis=1,
+                    axis = 1,
                 )
 
     df.to_csv(str(args.output_prefix) + '-res-in-list.csv', index=False)
 
     # xw: plot
-    if len(args.dms_mutation) == 0:
-      plot_esm_scan(args.sequence, args.output_prefix)
+    if args.dms_mutation:
+        plot_clinvar(df, args.output_prefix,indel=False)
+    elif args.dms_indel:
+        plot_clinvar(df, args.output_prefix,indel=True)
     else:
-      plot_clinvar(df, args.output_prefix)
+        plot_esm_scan(args.sequence, args.output_prefix)
+
 
 
 if __name__ == "__main__":
