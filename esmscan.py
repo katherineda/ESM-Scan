@@ -59,8 +59,8 @@ def plot_clinvar(df, output_prefix, indel=False):
     fig, ax = pylab.subplots()
 
     # Create histograms with density=True to normalize the data
-    ax.hist(pathogenic_scores, bins=300, density=True, color='red', alpha=0.5, label='ClinVar: Pathogenic')
-    ax.hist(benign_scores, bins=300, density=True, color='blue', alpha=0.5, label='Clinvar: Benign')
+    ax.hist(pathogenic_scores, bins=300, density=True, color='blue', alpha=0.5, label='ClinVar: Pathogenic')
+    ax.hist(benign_scores, bins=300, density=True, color='red', alpha=0.5, label='Clinvar: Benign')
 
     if indel:
         value_to_plot = df.loc[0, '/content/esm1b_t33_650M_UR50S.pt']
@@ -82,7 +82,7 @@ def plot_clinvar(df, output_prefix, indel=False):
     # Show the plot
     ax.set_title('Pathogenic vs. Benign Score Density Plot and Histogram')
     pylab.close()
-    fig.savefig(str(output_prefix) + '-graph.pdf')
+    fig.savefig(str(output_prefix) + '-densityplot.pdf')
 
 
 def plot_esm_scan(seq, output_prefix):
