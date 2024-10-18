@@ -49,7 +49,7 @@ def generate_user_indels(sequence, indel, output_file):
 
 
 # xw
-def plot_clinvar(df, output_prefix, indel=False):
+def plot_clinvar(df, output_prefix, indel):
     pathogenic_scores = np.load('./ESM-Scan/pathogenic_scores.npy')
     benign_scores = np.load('./ESM-Scan/benign_scores.npy')
     pylab.rcParams['pdf.fonttype'] = 42
